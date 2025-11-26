@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Koder - 手势控制虚拟地球 (Debug)</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js"></script>
+
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin: 0;
+            padding: 0;
+            background-color: #1a1a2e;
+            color: #4CAF50;
+            overflow: hidden; 
+        }
+        #webcam {
+            /* 摄像头现在可见，以便调试 */
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 5;
+            width: 100%;
+            height: 100%;
+            /* 镜像翻转视频流，使手势更自然 */
+            transform: scaleX(-1); 
+        }
+        #output_canvas {
+            /* 画布将覆盖在视频流之上 */
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 10;
+            border: 2px solid #4CAF50;
+        }
+        .info {
+            position: fixed;
+            bottom: 10px;
+            padding: 10px;
+            background-color: rgba(0, 0, 0, 0.7);
+            border-radius: 5px;
+            z-index: 20;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+
+    <video id="webcam" playsinline autoplay></video>
+
+    <canvas id="output_canvas"></canvas>
+
+    <div class="info">
+        <p>状态: <span id="status">正在加载...</span></p>
+        <p>控制: 左手捏合 + 上下移动</p>
+        <p>地球半径: <span id="radius_display">50</span></p>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const statusDisplay = document.getElementById('status');
+        const radiusDisplay = document.getElementById('radius_display');
+
+        // --- 核心配置 ---
+        const MIN_RADIUS = 30;
+        const MAX_RADIUS = 250;
+        const PINCH_THRESHOLD = 0.05; 
+        let earthRadius = 50;
+        let earthCenter = { x: 0, y: 0 };
+        const SMOOTHING_FACTOR = 0.1; 
+
+        // --- 尺寸同步：确保画布尺寸与视频流尺寸匹配 ---
+        function syncCanvasSize() {
+            // 将画布尺寸设为视频流的实时尺寸
+            canvasElement.width = videoElement.videoWidth;
+            canvasElement.height = videoElement.videoHeight;
+            earthCenter = { 
+                x: canvasElement.width / 2, 
+                y: canvasElement.height / 2 
+            };
+            
+            // 绘制一个中心点，以确认画布正常工作
+            canvasCtx.fillStyle = '#FF0000'; 
+            canvasCtx.fillRect(earthCenter.x - 5, earthCenter.y - 5, 10, 10);
+        }
+        // 监听视频流的尺寸变化
+        videoElement.addEventListener('loadeddata', syncCanvasSize);
+        window.addEventListener('resize', syncCanvasSize);
+
+
+        // --- 核心功能：处理 MediaPipe 结果 ---
+        function onResults(results) {
+            // 注意：MediaPipe 结果自带翻转，不需要在绘制时再次翻转
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height); // 清除画布
+            
+            // 绘制地球 (先绘制，确保它在最底层)
+            drawEarth();
+
+            if (results.multiHandLandmarks) {
+                let leftHandDetected = false;
+
+                for (const hand of results.multiHandLandmarks) {
+                    const handIndex = results.multiHandLandmarks.indexOf(hand);
+                    const handLabel = results.multiHandedness[handIndex].classification[0].label;
+
+                    // 绘制手部骨架 (颜色：绿色)
+                    mpHands.drawConnectors(canvasCtx, hand, mpHands.HAND_CONNECTIONS,
+                                        {color: '#00FF00', lineWidth: 5});
+                    mpHands.drawLandmarks(canvasCtx, hand, {color: '#FFFFFF', lineWidth: 2});
+
+                    if (handLabel === 'Left') {
+                        leftHandDetected = true;
+                        
+                        const thumbTip = hand[mpHands.HandLandmark.THUMB_TIP];
+                        const indexTip = hand[mpHands.HandLandmark.INDEX_FINGER_TIP];
+
+                        const distance = Math.sqrt(
+                            Math.pow(thumbTip.x - indexTip.x, 2) + 
+                            Math.pow(thumbTip.y - indexTip.y, 2)
+                        );
+                        
+                        let gestureStatus = "左手打开";
+
+                        if (distance < PINCH_THRESHOLD) {
+                            gestureStatus = "左手捏合 (Y轴控制)";
+                            
+                            const normalizedY = thumbTip.y; 
+                            
+                            let targetRadius = MIN_RADIUS + normalizedY * (MAX_RADIUS - MIN_RADIUS);
+                            
+                            earthRadius += (targetRadius - earthRadius) * SMOOTHING_FACTOR;
+                            earthRadius = Math.min(Math.max(earthRadius, MIN_RADIUS), MAX_RADIUS); 
+
+                        }
+                        
+                        // 显示手势状态文本
+                        canvasCtx.fillStyle = '#FFFFFF';
+                        canvasCtx.font = '20px Arial';
+                        canvasCtx.fillText(gestureStatus, 20, 30);
+                    }
+                }
+            } else {
+                canvasCtx.fillStyle = '#FF0000';
+                canvasCtx.font = '20px Arial';
+                canvasCtx.fillText("未检测到手部", 20, 30);
+            }
+
+            // 更新显示信息
+            statusDisplay.textContent = results.multiHandLandmarks ? "追踪中" : "等待手部...";
+            radiusDisplay.textContent = Math.round(earthRadius);
+
+            canvasCtx.restore();
+        }
+
+        // --- 绘制虚拟地球 ---
+        function drawEarth() {
+            canvasCtx.beginPath();
+            canvasCtx.arc(earthCenter.x, earthCenter.y, earthRadius, 0, 2 * Math.PI);
+            
+            // 提高地球的亮度，以便在深色背景下更容易被看到
+            canvasCtx.fillStyle = '#33ccff'; // 亮蓝色/青色
+            canvasCtx.fill();
+
+            // 绘制白色边框
+            canvasCtx.strokeStyle = '#FFFFFF';
+            canvasCtx.lineWidth = 3;
+            canvasCtx.stroke();
+            
+            // 绘制大小文本
+            canvasCtx.fillStyle = '#FFFFFF';
+            canvasCtx.font = 'bold 18px Arial';
+            canvasCtx.textAlign = 'center';
+            canvasCtx.fillText(`半径: ${Math.round(earthRadius)}`, earthCenter.x, earthCenter.y + earthRadius + 25);
+        }
+        
+        // --- 启动 MediaPipe 和摄像头 ---
+        const hands = new Hands({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}`;
+            }
+        });
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1, 
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        // 使用 Camera Utils 启动摄像头
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            // 使用移动设备常用的分辨率
+            width: 640,
+            height: 480 
+        });
+
+        camera.start().then(() => {
+            statusDisplay.textContent = "已就绪，请将左手对准摄像头";
+            // 成功启动后，尝试立即同步一次尺寸
+            videoElement.addEventListener('canplay', syncCanvasSize, { once: true });
+        }).catch(error => {
+            statusDisplay.textContent = `启动摄像头失败: ${error.name} (请检查摄像头权限)`;
+            console.error("Camera startup failed:", error);
+        });
+        
+    </script>
+</body>
+</html>
